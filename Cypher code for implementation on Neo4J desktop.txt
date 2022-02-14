@@ -1,0 +1,58 @@
+LOAD CSV WITH HEADERS from 'file:///lat_long.csv' as row
+CREATE (i:Item {x:row.latitude,y:row.longitude})
+RETURN COUNT(*)
+
+MATCH (i:Item)
+WITH i, rand() AS sortOrder
+ORDER BY sortOrder
+LIMIT 15
+CREATE (c:Centroid)
+SET c.location = i.location,
+c.iterations = 0
+RETURN *
+
+
+MATCH (c:Centroid)
+WITH collect(c) AS centroids
+UNWIND range(0, 15) AS num
+SET (centroids[num]).clusterNumber = num + 1
+RETURN centroids[num]
+
+MATCH (n) 
+RETURN labels(n)[0] AS nodeType, 
+n.location.x AS x,
+n.location.y AS y
+
+//Assign each item to the cluster with the nearest centroid
+MATCH (i:Item), (c:Centroid)
+WITH i, c ORDER BY distance(i.location, c.location)
+WITH i, collect(c) AS centroids
+SET i.clusterNumber = centroids[0].clusterNumber
+
+//Move each centroid to the mean of the currently assigned items
+MATCH (i:Item), (c:Centroid)
+WHERE i.clusterNumber = c.clusterNumber
+WITH c, avg(i.location.x) AS newX, avg(i.location.y) AS newY
+SET c.location = point({x:newX, y:newY}), 
+c.iterations = c.iterations + 1
+
+
+call apoc.periodic.commit(
+"MATCH (i:Item), (c:Centroid)
+   WITH i, c ORDER BY distance(i.location, c.location)
+   WITH i, i.clusterNumber AS oldClusterNumber, collect(c) AS 
+      centroids
+   SET i.clusterNumber = centroids[0].clusterNumber
+   WITH i, oldClusterNumber
+   WHERE i.clusterNumber <> oldClusterNumber
+   WITH count(*) AS changedCount
+   MATCH (i:Item), (c:Centroid)
+   WHERE i.clusterNumber = c.clusterNumber
+   WITH changedCount, c, avg(i.location.x) AS newX, 
+      avg(i.location.y) AS newY
+   SET c.location = point({x:newX, y:newY}),
+   c.iterations = c.iterations + 1
+   RETURN CASE WHEN c.iterations < 20 THEN changedCount ELSE 0 END
+   LIMIT 1"
+   ,{})
+
